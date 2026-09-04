@@ -235,11 +235,11 @@ def _diff_with_blocks(
          自前LCSで通常のdiffを行い、ブロック自体はそのアンカー位置に
          対応付けて replace/insert/delete として出力する。
 
-    before_lines が無い(ADD)ブロックはアンカーを持たないため、次に見つかった
-    アンカー(無ければ a の末尾)までの区間をまとめて通常diffし、その
-    diffが終わった位置にブロックを挿入する。
-    MOD/DEL は変更前コードが必ず a 側に存在するはずなので、見つからない
-    場合は BlockMarkerError を送出する。
+    before_lines が無い(ADD)ブロックや、対応するコードが a 側に
+    見つからなかった(MOD/DELだが例外的に対応が取れない)ブロックは
+    アンカーを持たないため、次に見つかったアンカー(無ければ a の末尾)
+    までの区間をまとめて通常diffし、そのdiffが終わった位置にブロックを
+    挿入する。この場合 get_block_annotations() の matched は False になる。
     """
     # 1st pass: 各ブロックのアンカー(a側の一致位置)を先読みで求める
     anchors: List[Tuple[Optional[int], int, bool]] = []
@@ -248,16 +248,13 @@ def _diff_with_blocks(
         if blk.before_lines:
             pos = _find_subsequence(a, blk.before_lines, cursor)
             if pos is None:
-                # MOD/DELはコメントを外した内容が変更前ファイルに必ず対応する
-                # コードとして存在していないとおかしい(ADDと違い元コードが
-                # あるはずの変更なので)。見つからない場合はエラーにする。
-                raise BlockMarkerError(
-                    f"変更前コードと対応するものが見つかりません: "
-                    f"{blk.block_type} <{blk.ngy_id}> ({blk.start + 1}〜{blk.end}行目)。"
-                    f"コメントを外した内容が左側ファイルの該当箇所と一致しているか確認してください。"
-                )
-            anchors.append((pos, len(blk.before_lines), True))
-            cursor = pos + len(blk.before_lines)
+                # MOD/DELは本来、コメントを外した内容が変更前ファイルの
+                # どこかに対応しているはずだが、例外的に見つからないケースも
+                # あり得るため、エラーにはせず「対応なし」として扱う。
+                anchors.append((None, 0, False))
+            else:
+                anchors.append((pos, len(blk.before_lines), True))
+                cursor = pos + len(blk.before_lines)
         else:
             anchors.append((None, 0, True))  # ADDは元コードが無いのが正解
 

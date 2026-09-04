@@ -246,8 +246,9 @@ after
         sm = JavaBlockSequenceMatcher(None, a, b)  # 例外が出なければOK
         self.assertTrue(sm.get_block_annotations()[0]["matched"])
 
-    def test_mod_without_matching_original_code_raises(self):
-        # MODは変更前コードが左側に見つからないとおかしいのでエラーにする
+    def test_mod_without_matching_original_code_is_not_an_error(self):
+        # 例外的に対応する変更前コードが見つからないケースもあるため、
+        # エラーにはせず matched=False として扱う
         a = L("before\nsomething else\nafter")
         b = L(
             """
@@ -259,11 +260,10 @@ int x = 2;
 after
 """
         )
-        with self.assertRaises(BlockMarkerError):
-            JavaBlockSequenceMatcher(None, a, b)
+        sm = JavaBlockSequenceMatcher(None, a, b)
+        self.assertFalse(sm.get_block_annotations()[0]["matched"])
 
-    def test_del_without_matching_original_code_raises(self):
-        # DELも同様に、コメントを外した内容が左側に存在しないとエラーにする
+    def test_del_without_matching_original_code_is_not_an_error(self):
         a = L("before\nsomething else\nafter")
         b = L(
             """
@@ -274,8 +274,8 @@ before
 after
 """
         )
-        with self.assertRaises(BlockMarkerError):
-            JavaBlockSequenceMatcher(None, a, b)
+        sm = JavaBlockSequenceMatcher(None, a, b)
+        self.assertFalse(sm.get_block_annotations()[0]["matched"])
 
     def test_ratio_still_works(self):
         a = L("aaa\nbbb")
