@@ -5,7 +5,7 @@ Java向けのブロック単位diffツール。
 
 difflib.SequenceMatcher と同じインタフェース(get_opcodes / get_matching_blocks /
 ratio など)を提供しつつ、以下のマーカーで囲まれたブロックを1つの変更単位として
-扱い、変更前(left / a)のコードと対応付けて差分を出す。
+扱い、マーカーの無い側のコードと対応付けて差分を出す。
 
     // ADD開始 <NGY-xxx>
     ...新規コード...
@@ -20,16 +20,23 @@ ratio など)を提供しつつ、以下のマーカーで囲まれたブロッ�
     // 削除されたコード(コメント化されている)
     // DEL終了 <NGY-xxx>
 
+- マーカーは left(a) 側・right(b) 側のどちらにあってもよい(自動判定)。
+  両側にマーカーが無ければ通常のdiffになる。
 - 開始マーカーと終了マーカーは種別(ADD/MOD/DEL)とNGY-IDが一致していなければ
   ならない。対応するペアが見つからない場合は BlockMarkerError を送出する。
 - ブロックは入れ子になってよい。入れ子になった場合、一番外側のブロックを
   1つの変更単位として扱い、差分はその外側ブロック単位でまとめて出す。
 - MOD/DEL ブロック内の「// 」で始まる行は "変更前のコード" とみなし、
-  先頭の "// " を取り除いた上で、変更前(left)ファイルの該当箇所を
-  そのままの並びで探索してマッチングする。マッチした範囲が
-  「このブロックに対応する変更前コード」として opcode の a 側範囲になる。
-  それ以外の行(コメントでない行)は "変更後のコード" とみなす。
-- ADD ブロックには変更前コードが存在しないため、常に insert として扱われる。
+  先頭の "// " を取り除いたものを before として保持する。それ以外の行
+  (コメントでない行)は "変更後のコード"(after)とみなす。
+- マーカーがある側を基準に、マーカーが無い側のファイルの該当箇所を探索して
+  対応付ける。
+    - マーカーが right(b) 側にある場合: MOD/DEL の before を left(a) 側から
+      探索してマッチングする。ADD には変更前コードが存在しないため常に
+      insert として扱われる。
+    - マーカーが left(a) 側にある場合: ADD/MOD の after を right(b) 側から
+      探索してマッチングする。DEL には変更後コードが存在しないため常に
+      delete として扱われる。
 
 NOTE: difflib は使用禁止のため、通常区間(ブロックの外側)の差分は
 自前実装のLCS(動的計画法による最長共通部分列)で計算している。
@@ -223,10 +230,12 @@ def _lcs_opcodes(a: Sequence[str], b: Sequence[str]) -> List[Opcode]:
     return opcodes
 
 
-def _diff_with_blocks(
+def _diff_with_blocks_right(
     a: Sequence[str], b: Sequence[str], blocks: List[Block]
 ) -> Tuple[List[Opcode], List[dict]]:
-    """ブロックを変更前(a)コードと対応付けながら全体のopcodesを組み立てる。
+    """b(right)側にADD/MOD/DELマーカーがある場合の対応付けdiff。
+
+    ブロックを変更前(a)コードと対応付けながら全体のopcodesを組み立てる。
 
     2段階で処理する:
       1. before_lines を持つブロック(MOD/DEL)について、a側での対応位置
@@ -322,6 +331,86 @@ def _diff_with_blocks(
     return opcodes, annotations
 
 
+def _diff_with_blocks_left(
+    a: Sequence[str], b: Sequence[str], blocks: List[Block]
+) -> Tuple[List[Opcode], List[dict]]:
+    """a(left)側にADD/MOD/DELマーカーがある場合の対応付けdiff。
+
+    ブロックのa側範囲はマーカー自体から確定済み(探索不要)なので、
+    ブロックのafter_lines(変更後のコード)がb(right, 無印ファイル)側の
+    どこに対応するかを先読みで探し、アンカーとする。
+    DELブロックはafter_linesが無い(=削除された)ため、常にb側では
+    アンカー無し(=削除扱い)になる。
+    """
+    anchors: List[Tuple[Optional[int], int, bool]] = []
+    cursor = 0
+    for blk in blocks:
+        if blk.after_lines:
+            pos = _find_subsequence(b, blk.after_lines, cursor)
+            if pos is None:
+                anchors.append((None, 0, False))
+            else:
+                anchors.append((pos, len(blk.after_lines), True))
+                cursor = pos + len(blk.after_lines)
+        else:
+            anchors.append((None, 0, True))  # DELは変更後コードが無いのが正解
+
+    upper_bounds: List[int] = [len(b)] * len(blocks)
+    next_known = len(b)
+    for idx in range(len(blocks) - 1, -1, -1):
+        pos, _, _ = anchors[idx]
+        if pos is not None:
+            next_known = pos
+        upper_bounds[idx] = next_known
+
+    opcodes: List[Opcode] = []
+    annotations: List[dict] = []
+    a_cursor = 0
+    b_cursor = 0
+
+    for blk, (pos, after_len, matched), upper in zip(blocks, anchors, upper_bounds):
+        gap_a_len = blk.start - a_cursor
+        if pos is not None:
+            gap_b_end = pos
+        else:
+            # アンカーが無い場合、直前の通常コード部分はほぼ1対1で並んでいる
+            # という前提で、gap_aと同じ行数だけ(次のアンカーを超えない範囲で)
+            # b側を対象にする。
+            gap_b_end = min(b_cursor + gap_a_len, upper)
+        gap_a = list(a[a_cursor:blk.start])
+        gap_b = list(b[b_cursor:gap_b_end])
+        for tag, gi1, gi2, gj1, gj2 in _lcs_opcodes(gap_a, gap_b):
+            opcodes.append((tag, a_cursor + gi1, a_cursor + gi2, b_cursor + gj1, b_cursor + gj2))
+
+        real_pos = pos if pos is not None else gap_b_end
+
+        # ブロックのa側は(マーカー行を含めて)常に非空なので insert にはならない
+        block_tag = "delete" if after_len == 0 else "replace"
+
+        opcodes.append((block_tag, blk.start, blk.end, real_pos, real_pos + after_len))
+
+        annotations.append(
+            {
+                "block_type": blk.block_type,
+                "ngy_id": blk.ngy_id,
+                "matched": matched,
+                "a_range": (blk.start, blk.end),
+                "b_range": (real_pos, real_pos + after_len),
+                "tag": block_tag,
+            }
+        )
+
+        a_cursor = blk.end
+        b_cursor = real_pos + after_len
+
+    gap_a = list(a[a_cursor:])
+    gap_b = list(b[b_cursor:])
+    for tag, gi1, gi2, gj1, gj2 in _lcs_opcodes(gap_a, gap_b):
+        opcodes.append((tag, a_cursor + gi1, a_cursor + gi2, b_cursor + gj1, b_cursor + gj2))
+
+    return opcodes, annotations
+
+
 class PlainSequenceMatcher:
     """difflib.SequenceMatcher の代替となる、ブロックマーカーを扱わない
     シンプルなLCSベースdiffクラス(difflib非依存)。"""
@@ -357,8 +446,9 @@ class PlainSequenceMatcher:
 class JavaBlockSequenceMatcher:
     """difflib.SequenceMatcher と互換のインタフェースを持つブロック単位diffクラス。
 
-    b(通常は変更後/right側のファイル)にADD/MOD/DELマーカーが含まれている
-    ことを想定する。a(変更前/left側)は無印の通常コードでよい。
+    a(left)・b(right)のどちらか一方にADD/MOD/DELマーカーが含まれている
+    ことを想定する(どちら側かは自動判定する)。マーカーが無い方は
+    無印の通常コードでよい。両方とも無印の場合は通常のLCS diffになる。
     """
 
     def __init__(
@@ -376,9 +466,18 @@ class JavaBlockSequenceMatcher:
         self.a = list(a)
         self.b = list(b)
         # マーカーのペア崩れはどちら側にあってもエラーにする
-        parse_blocks(self.a)
-        self._blocks = parse_blocks(self.b)
-        self._opcodes, self._annotations = _diff_with_blocks(self.a, self.b, self._blocks)
+        blocks_a = parse_blocks(self.a)
+        blocks_b = parse_blocks(self.b)
+        if blocks_b:
+            self._blocks = blocks_b
+            self._opcodes, self._annotations = _diff_with_blocks_right(self.a, self.b, blocks_b)
+        elif blocks_a:
+            self._blocks = blocks_a
+            self._opcodes, self._annotations = _diff_with_blocks_left(self.a, self.b, blocks_a)
+        else:
+            self._blocks = []
+            self._opcodes = _lcs_opcodes(self.a, self.b)
+            self._annotations = []
 
     def get_opcodes(self) -> List[Opcode]:
         return list(self._opcodes)

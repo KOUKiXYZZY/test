@@ -283,5 +283,88 @@ after
         self.assertEqual(JavaBlockSequenceMatcher(None, a, b).ratio(), 1.0)
 
 
+class TestJavaBlockSequenceMatcherMarkersOnLeft(unittest.TestCase):
+    """マーカーがleft(a)側にあるケース。"""
+
+    def test_add_block_on_left_is_delete_relative_to_a(self):
+        # ADDはaにしか無い新規追加コードなので、bには存在せず delete扱いになる
+        a = L(
+            """
+before
+// ADD開始 <NGY-001>
+new1
+new2
+// ADD終了 <NGY-001>
+after
+"""
+        )
+        b = L("before\nafter")
+        sm = JavaBlockSequenceMatcher(None, a, b)
+        ops = sm.get_opcodes()
+        self.assertIn(("equal", 0, 1, 0, 1), ops)
+        self.assertIn(("delete", 1, 5, 1, 1), ops)
+        self.assertIn(("equal", 5, 6, 1, 2), ops)
+
+        anns = sm.get_block_annotations()
+        self.assertEqual(anns[0]["block_type"], "ADD")
+        self.assertEqual(anns[0]["ngy_id"], "NGY-001")
+        self.assertEqual(anns[0]["b_range"], (1, 1))
+
+    def test_mod_block_on_left_maps_to_right_code(self):
+        a = L(
+            """
+before
+// MOD開始 <NGY-010>
+// int x = 1;
+int x = 2;
+// MOD終了 <NGY-010>
+after
+"""
+        )
+        b = L("before\nint x = 2;\nafter")
+        sm = JavaBlockSequenceMatcher(None, a, b)
+        ops = sm.get_opcodes()
+        # aのブロック全体(1:5)がbの新コード(int x = 2;, 1:2)に対応付けられる
+        self.assertIn(("replace", 1, 5, 1, 2), ops)
+
+        anns = sm.get_block_annotations()
+        self.assertEqual(anns[0]["block_type"], "MOD")
+        self.assertTrue(anns[0]["matched"])
+        self.assertEqual(anns[0]["b_range"], (1, 2))
+
+    def test_del_block_on_left_has_nothing_on_right(self):
+        a = L(
+            """
+before
+// DEL開始 <NGY-020>
+// int unused = 0;
+// DEL終了 <NGY-020>
+after
+"""
+        )
+        b = L("before\nafter")
+        sm = JavaBlockSequenceMatcher(None, a, b)
+        ops = sm.get_opcodes()
+        self.assertIn(("delete", 1, 4, 1, 1), ops)
+
+        anns = sm.get_block_annotations()
+        self.assertEqual(anns[0]["block_type"], "DEL")
+        self.assertTrue(anns[0]["matched"])
+        self.assertEqual(anns[0]["b_range"], (1, 1))
+
+    def test_no_markers_on_either_side_is_plain_diff(self):
+        a = L("aaa\nbbb\nccc")
+        b = L("aaa\nxxx\nccc")
+        sm = JavaBlockSequenceMatcher(None, a, b)
+        self.assertEqual(
+            sm.get_opcodes(),
+            [
+                ("equal", 0, 1, 0, 1),
+                ("replace", 1, 2, 1, 2),
+                ("equal", 2, 3, 2, 3),
+            ],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
