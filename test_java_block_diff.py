@@ -231,6 +231,52 @@ line1
         with self.assertRaises(BlockMarkerError):
             JavaBlockSequenceMatcher(None, a, b)
 
+    def test_add_without_original_code_is_fine(self):
+        # ADDは新規追加なので、左側に対応するコードが無くてもエラーにならない
+        a = L("before\nafter")
+        b = L(
+            """
+before
+// ADD開始 <NGY-001>
+new1
+// ADD終了 <NGY-001>
+after
+"""
+        )
+        sm = JavaBlockSequenceMatcher(None, a, b)  # 例外が出なければOK
+        self.assertTrue(sm.get_block_annotations()[0]["matched"])
+
+    def test_mod_without_matching_original_code_raises(self):
+        # MODは変更前コードが左側に見つからないとおかしいのでエラーにする
+        a = L("before\nsomething else\nafter")
+        b = L(
+            """
+before
+// MOD開始 <NGY-010>
+// int x = 1;
+int x = 2;
+// MOD終了 <NGY-010>
+after
+"""
+        )
+        with self.assertRaises(BlockMarkerError):
+            JavaBlockSequenceMatcher(None, a, b)
+
+    def test_del_without_matching_original_code_raises(self):
+        # DELも同様に、コメントを外した内容が左側に存在しないとエラーにする
+        a = L("before\nsomething else\nafter")
+        b = L(
+            """
+before
+// DEL開始 <NGY-020>
+// int unused = 0;
+// DEL終了 <NGY-020>
+after
+"""
+        )
+        with self.assertRaises(BlockMarkerError):
+            JavaBlockSequenceMatcher(None, a, b)
+
     def test_ratio_still_works(self):
         a = L("aaa\nbbb")
         b = L("aaa\nbbb")
