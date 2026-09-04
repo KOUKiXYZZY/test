@@ -1,20 +1,24 @@
 import unittest
 
-from java_block_diff import JavaBlockSequenceMatcher
+from java_block_diff import (
+    BlockMarkerError,
+    JavaBlockSequenceMatcher,
+    PlainSequenceMatcher,
+    parse_blocks,
+)
 
 
 def L(text):
     return [line + "\n" for line in text.strip("\n").split("\n")]
 
 
-class TestJavaBlockSequenceMatcher(unittest.TestCase):
+class TestPlainSequenceMatcher(unittest.TestCase):
     def test_plain_lines_behave_like_difflib(self):
         a = L("aaa\nbbb\nccc")
         b = L("aaa\nxxx\nccc")
-        sm = JavaBlockSequenceMatcher(None, a, b)
-        ops = sm.get_opcodes()
+        sm = PlainSequenceMatcher(None, a, b)
         self.assertEqual(
-            ops,
+            sm.get_opcodes(),
             [
                 ("equal", 0, 1, 0, 1),
                 ("replace", 1, 2, 1, 2),
@@ -22,103 +26,215 @@ class TestJavaBlockSequenceMatcher(unittest.TestCase):
             ],
         )
 
-    def test_block_treated_as_single_unit(self):
-        a = L(
-            """
-before
-// ADD START
-line1
-line2
-// ADD END
-after
-"""
-        )
-        b = L(
-            """
-before
-// ADD START
-line1
-line2changed
-// ADD END
-after
-"""
-        )
-        sm = JavaBlockSequenceMatcher(None, a, b)
-        ops = sm.get_opcodes()
-        # ブロック内の1行だけ変わっても、ブロック全体(4行)が1つのreplaceになる
-        self.assertEqual(
-            ops,
-            [
-                ("equal", 0, 1, 0, 1),
-                ("replace", 1, 5, 1, 5),
-                ("equal", 5, 6, 5, 6),
-            ],
-        )
-
-    def test_block_unchanged_is_equal(self):
-        a = L(
-            """
-// ADD START
-line1
-// ADD END
-"""
-        )
-        b = L(
-            """
-// ADD START
-line1
-// ADD END
-"""
-        )
-        sm = JavaBlockSequenceMatcher(None, a, b)
-        ops = sm.get_opcodes()
-        self.assertEqual(ops, [("equal", 0, 3, 0, 3)])
-
-    def test_ratio_matches_difflib_semantics(self):
+    def test_ratio(self):
         a = L("aaa\nbbb")
         b = L("aaa\nbbb")
-        sm = JavaBlockSequenceMatcher(None, a, b)
-        self.assertEqual(sm.ratio(), 1.0)
+        self.assertEqual(PlainSequenceMatcher(None, a, b).ratio(), 1.0)
 
-    def test_custom_markers(self):
-        a = L(
+
+class TestParseBlocks(unittest.TestCase):
+    def test_add_block(self):
+        lines = L(
             """
-x
-/* GEN-BEGIN */
-foo
-/* GEN-END */
-y
+before
+// ADD開始 <NGY-001>
+line1
+line2
+// ADD終了 <NGY-001>
+after
 """
         )
-        b = L(
+        blocks = parse_blocks(lines)
+        self.assertEqual(len(blocks), 1)
+        blk = blocks[0]
+        self.assertEqual(blk.block_type, "ADD")
+        self.assertEqual(blk.ngy_id, "NGY-001")
+        self.assertEqual(blk.before_lines, [])
+        self.assertEqual(blk.after_lines, L("line1\nline2"))
+
+    def test_mod_block_splits_before_after(self):
+        lines = L(
             """
-x
-/* GEN-BEGIN */
-bar
-/* GEN-END */
-y
+// MOD開始 <NGY-010>
+// int x = 1;
+int x = 2;
+// MOD終了 <NGY-010>
 """
         )
-        sm = JavaBlockSequenceMatcher(
-            None, a, b, block_start=r"/\*\s*GEN-BEGIN", block_end=r"/\*\s*GEN-END"
-        )
-        ops = sm.get_opcodes()
-        self.assertEqual(
-            ops,
-            [
-                ("equal", 0, 1, 0, 1),
-                ("replace", 1, 4, 1, 4),
-                ("equal", 4, 5, 4, 5),
-            ],
-        )
+        blocks = parse_blocks(lines)
+        blk = blocks[0]
+        self.assertEqual(blk.block_type, "MOD")
+        self.assertEqual(blk.before_lines, ["int x = 1;\n"])
+        self.assertEqual(blk.after_lines, ["int x = 2;\n"])
 
-    def test_get_matching_blocks_line_indices(self):
+    def test_del_block_all_commented(self):
+        lines = L(
+            """
+// DEL開始 <NGY-020>
+// int unused = 0;
+// DEL終了 <NGY-020>
+"""
+        )
+        blocks = parse_blocks(lines)
+        blk = blocks[0]
+        self.assertEqual(blk.block_type, "DEL")
+        self.assertEqual(blk.before_lines, ["int unused = 0;\n"])
+        self.assertEqual(blk.after_lines, [])
+
+    def test_unmatched_end_raises(self):
+        lines = L(
+            """
+// ADD終了 <NGY-999>
+"""
+        )
+        with self.assertRaises(BlockMarkerError):
+            parse_blocks(lines)
+
+    def test_unclosed_start_raises(self):
+        lines = L(
+            """
+// ADD開始 <NGY-001>
+line1
+"""
+        )
+        with self.assertRaises(BlockMarkerError):
+            parse_blocks(lines)
+
+    def test_mismatched_type_raises(self):
+        lines = L(
+            """
+// MOD開始 <NGY-001>
+// old
+new
+// DEL終了 <NGY-001>
+"""
+        )
+        with self.assertRaises(BlockMarkerError):
+            parse_blocks(lines)
+
+    def test_mismatched_id_raises(self):
+        lines = L(
+            """
+// ADD開始 <NGY-001>
+line1
+// ADD終了 <NGY-002>
+"""
+        )
+        with self.assertRaises(BlockMarkerError):
+            parse_blocks(lines)
+
+    def test_nested_blocks_outer_only(self):
+        lines = L(
+            """
+// MOD開始 <NGY-100>
+// outer old
+// ADD開始 <NGY-101>
+inner new
+// ADD終了 <NGY-101>
+// MOD終了 <NGY-100>
+"""
+        )
+        blocks = parse_blocks(lines)
+        # 一番外側のブロックだけが top-level として返る
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0].block_type, "MOD")
+        self.assertEqual(blocks[0].ngy_id, "NGY-100")
+
+
+class TestJavaBlockSequenceMatcher(unittest.TestCase):
+    def test_no_markers_behaves_like_plain_diff(self):
         a = L("aaa\nbbb\nccc")
         b = L("aaa\nxxx\nccc")
         sm = JavaBlockSequenceMatcher(None, a, b)
-        blocks = sm.get_matching_blocks()
-        self.assertEqual(blocks[0], (0, 0, 1))
-        self.assertEqual(blocks[-1], (3, 3, 0))
+        self.assertEqual(
+            sm.get_opcodes(),
+            [
+                ("equal", 0, 1, 0, 1),
+                ("replace", 1, 2, 1, 2),
+                ("equal", 2, 3, 2, 3),
+            ],
+        )
+
+    def test_add_block_is_insert(self):
+        a = L("before\nafter")
+        b = L(
+            """
+before
+// ADD開始 <NGY-001>
+new1
+new2
+// ADD終了 <NGY-001>
+after
+"""
+        )
+        sm = JavaBlockSequenceMatcher(None, a, b)
+        ops = sm.get_opcodes()
+        self.assertIn(("equal", 0, 1, 0, 1), ops)
+        self.assertIn(("insert", 1, 1, 1, 5), ops)
+        self.assertIn(("equal", 1, 2, 5, 6), ops)
+
+        anns = sm.get_block_annotations()
+        self.assertEqual(len(anns), 1)
+        self.assertEqual(anns[0]["block_type"], "ADD")
+        self.assertEqual(anns[0]["ngy_id"], "NGY-001")
+        self.assertEqual(anns[0]["a_range"], (1, 1))
+
+    def test_mod_block_maps_to_original_code(self):
+        a = L("before\nint x = 1;\nafter")
+        b = L(
+            """
+before
+// MOD開始 <NGY-010>
+// int x = 1;
+int x = 2;
+// MOD終了 <NGY-010>
+after
+"""
+        )
+        sm = JavaBlockSequenceMatcher(None, a, b)
+        ops = sm.get_opcodes()
+        # 変更前の "int x = 1;" (a側1行目)がブロックに対応付けられ replace になる
+        self.assertIn(("replace", 1, 2, 1, 5), ops)
+
+        anns = sm.get_block_annotations()
+        self.assertEqual(anns[0]["block_type"], "MOD")
+        self.assertTrue(anns[0]["matched"])
+        self.assertEqual(anns[0]["a_range"], (1, 2))
+
+    def test_del_block_maps_to_original_code(self):
+        a = L("before\nint unused = 0;\nafter")
+        b = L(
+            """
+before
+// DEL開始 <NGY-020>
+// int unused = 0;
+// DEL終了 <NGY-020>
+after
+"""
+        )
+        sm = JavaBlockSequenceMatcher(None, a, b)
+        ops = sm.get_opcodes()
+        self.assertIn(("delete", 1, 2, 1, 4), ops)
+
+        anns = sm.get_block_annotations()
+        self.assertEqual(anns[0]["block_type"], "DEL")
+        self.assertTrue(anns[0]["matched"])
+
+    def test_unmatched_marker_raises(self):
+        a = L("x")
+        b = L(
+            """
+// ADD開始 <NGY-001>
+line1
+"""
+        )
+        with self.assertRaises(BlockMarkerError):
+            JavaBlockSequenceMatcher(None, a, b)
+
+    def test_ratio_still_works(self):
+        a = L("aaa\nbbb")
+        b = L("aaa\nbbb")
+        self.assertEqual(JavaBlockSequenceMatcher(None, a, b).ratio(), 1.0)
 
 
 if __name__ == "__main__":

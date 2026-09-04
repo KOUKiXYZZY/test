@@ -3,11 +3,11 @@
 import argparse
 import sys
 
-from java_block_diff import _SimpleSequenceMatcher
+from java_block_diff import PlainSequenceMatcher
 
 def smart_merge(left_lines, right_lines, keyword):
     """差分ブロックごとに、左側にキーワードがあれば左を、なければ右を採用する"""
-    sm = _SimpleSequenceMatcher(None, left_lines, right_lines, autojunk=False)
+    sm = PlainSequenceMatcher(None, left_lines, right_lines, autojunk=False)
     merged = []
 
     for tag, i1, i2, j1, j2 in sm.get_opcodes():

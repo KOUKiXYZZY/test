@@ -4,141 +4,207 @@
 Java向けのブロック単位diffツール。
 
 difflib.SequenceMatcher と同じインタフェース(get_opcodes / get_matching_blocks /
-ratio など)を提供しつつ、
+ratio など)を提供しつつ、以下のマーカーで囲まれたブロックを1つの変更単位として
+扱い、変更前(left / a)のコードと対応付けて差分を出す。
 
-    // ADD START
-    ...
-    // ADD END
+    // ADD開始 <NGY-xxx>
+    ...新規コード...
+    // ADD終了 <NGY-xxx>
 
-のようなコメントペアで囲まれた範囲を「1ブロック」としてまとめて差分判定する。
-ブロックの外側は通常のLCSベースdiffと同じ行単位の差分になる。
+    // MOD開始 <NGY-xxx>
+    // 元のコード(コメント化されている)
+    新しいコード
+    // MOD終了 <NGY-xxx>
 
-NOTE: difflib は使用禁止のため、SequenceMatcher相当のロジック(LCSベースの
-最長共通部分列アルゴリズム)を自前で実装している。
+    // DEL開始 <NGY-xxx>
+    // 削除されたコード(コメント化されている)
+    // DEL終了 <NGY-xxx>
 
-使い方:
+- 開始マーカーと終了マーカーは種別(ADD/MOD/DEL)とNGY-IDが一致していなければ
+  ならない。対応するペアが見つからない場合は BlockMarkerError を送出する。
+- ブロックは入れ子になってよい。入れ子になった場合、一番外側のブロックを
+  1つの変更単位として扱い、差分はその外側ブロック単位でまとめて出す。
+- MOD/DEL ブロック内の「// 」で始まる行は "変更前のコード" とみなし、
+  先頭の "// " を取り除いた上で、変更前(left)ファイルの該当箇所を
+  そのままの並びで探索してマッチングする。マッチした範囲が
+  「このブロックに対応する変更前コード」として opcode の a 側範囲になる。
+  それ以外の行(コメントでない行)は "変更後のコード" とみなす。
+- ADD ブロックには変更前コードが存在しないため、常に insert として扱われる。
 
-    >>> sm = JavaBlockSequenceMatcher(None, left_lines, right_lines)
-    >>> for tag, i1, i2, j1, j2 in sm.get_opcodes():
-    ...     ...
-
-get_opcodes() / get_matching_blocks() は「ブロック単位」ではなく、常に
-元の行番号(1行単位のインデックス)ベースで結果を返す。ブロックとして
-まとめられた範囲は、ブロック内のどこか1行でも差があれば
-ブロック全体が replace/insert/delete としてまとまって出力される。
+NOTE: difflib は使用禁止のため、通常区間(ブロックの外側)の差分は
+自前実装のLCS(動的計画法による最長共通部分列)で計算している。
 """
 from __future__ import annotations
 
 import argparse
 import re
 import sys
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 Opcode = Tuple[str, int, int, int, int]
 MatchingBlock = Tuple[int, int, int]
 
-DEFAULT_BLOCK_START = r"//\s*ADD\s*START"
-DEFAULT_BLOCK_END = r"//\s*ADD\s*END"
+BLOCK_TYPES = ("ADD", "MOD", "DEL")
+
+_START_RE = re.compile(r"//\s*(ADD|MOD|DEL)開始\s*<(NGY-[^>\s]+)>")
+_END_RE = re.compile(r"//\s*(ADD|MOD|DEL)終了\s*<(NGY-[^>\s]+)>")
+_COMMENT_LINE_RE = re.compile(r"^\s*//\s?(.*)$")
 
 
-class _Unit:
-    """比較する1要素。通常行 or ブロックをラップする。"""
+class BlockMarkerError(ValueError):
+    """ADD/MOD/DEL マーカーの開始・終了ペアが不正なときに送出される例外。"""
 
-    __slots__ = ("start", "end", "key")
 
-    def __init__(self, start: int, end: int, key: str):
-        # [start, end) は元の行配列における半開区間。
-        # 通常行の場合は end == start + 1。
+class Block:
+    """1つの ADD/MOD/DEL ブロック(一番外側のもの)を表す。"""
+
+    __slots__ = ("block_type", "ngy_id", "start", "end", "before_lines", "after_lines")
+
+    def __init__(
+        self,
+        block_type: str,
+        ngy_id: str,
+        start: int,
+        end: int,
+        before_lines: List[str],
+        after_lines: List[str],
+    ):
+        self.block_type = block_type
+        self.ngy_id = ngy_id
+        # [start, end) はブロックが属するファイル(b側)における行範囲(マーカー行を含む)
         self.start = start
         self.end = end
-        self.key = key
+        self.before_lines = before_lines
+        self.after_lines = after_lines
 
-    def __eq__(self, other):
-        return isinstance(other, _Unit) and self.key == other.key
+    def __repr__(self):
+        return (
+            f"Block({self.block_type}, {self.ngy_id!r}, "
+            f"start={self.start}, end={self.end})"
+        )
 
-    def __hash__(self):
-        return hash(self.key)
+
+def _strip_comment_prefix(line: str) -> str:
+    has_nl = line.endswith("\n")
+    body = line[:-1] if has_nl else line
+    m = _COMMENT_LINE_RE.match(body)
+    content = m.group(1) if m else body
+    return content + ("\n" if has_nl else "")
 
 
-def _group_units(
-    lines: Sequence[str],
-    block_start: "re.Pattern",
-    block_end: "re.Pattern",
-) -> List[_Unit]:
-    """行配列を走査し、ブロックコメントで囲まれた範囲を1つの _Unit にまとめる。
-
-    ネストは考慮しない(Javaのコメントブロックはフラットである前提)。
-    START に対応する END が見つからない場合は、そのSTART行以降を
-    ファイル末尾までのブロックとして扱う。
-    """
-    units: List[_Unit] = []
-    i = 0
-    n = len(lines)
-    while i < n:
-        if block_start.search(lines[i]):
-            j = i + 1
-            while j < n and not block_end.search(lines[j]):
-                j += 1
-            end = min(j + 1, n) if j < n else n
-            key = "".join(lines[i:end])
-            units.append(_Unit(i, end, key))
-            i = end
+def _split_before_after(content_lines: List[str], block_type: str) -> Tuple[List[str], List[str]]:
+    if block_type == "ADD":
+        return [], list(content_lines)
+    if block_type == "DEL":
+        before = [_strip_comment_prefix(line) for line in content_lines]
+        return before, []
+    # MOD: "//" で始まる行が変更前、それ以外が変更後
+    before: List[str] = []
+    after: List[str] = []
+    for line in content_lines:
+        if re.match(r"^\s*//", line):
+            before.append(_strip_comment_prefix(line))
         else:
-            units.append(_Unit(i, i + 1, lines[i]))
-            i += 1
-    return units
+            after.append(line)
+    return before, after
 
 
-def _lcs_matching_blocks(a: Sequence, b: Sequence) -> List[Tuple[int, int, int]]:
-    """自前実装のLCS(最長共通部分列)に基づくマッチングブロック計算。
+def parse_blocks(lines: Sequence[str]) -> List[Block]:
+    """ADD/MOD/DEL マーカーを走査し、一番外側のブロック一覧を返す。
 
-    difflib.SequenceMatcher.get_matching_blocks() と同じ形式
-    ([(ai, bj, size), ..., (len(a), len(b), 0)]) を返す。
-
-    b の要素値 -> 出現インデックス一覧のインデックスを作り、
-    「aの各要素についてbのどこにマッチしうるか」を絞り込んだ上で
-    動的計画法により最長一致連鎖(＝最長共通部分列)を求める。
-    このアルゴリズムは連続した一致(オートジャンクなどの発見的手法)は
-    行わず、常に厳密なLCSを返す点でdifflibの既定動作と多少異なるが、
-    diff結果としては妥当な最小差分を与える。
+    入れ子は許容するが、開始・終了マーカーは種別とNGY-IDが一致した状態で
+    正しくペアになっている必要がある。ペアが崩れている場合は
+    BlockMarkerError を送出する。
     """
-    n, m = len(a), len(b)
-    if n == 0 or m == 0:
-        return [(n, m, 0)]
+    stack: List[dict] = []
+    top_level: List[Block] = []
 
-    # dp[i][j] = a[i:] と b[j:] のLCS長
+    for idx, line in enumerate(lines):
+        start_m = _START_RE.search(line)
+        end_m = _END_RE.search(line)
+
+        if start_m:
+            btype, ngy_id = start_m.group(1), start_m.group(2)
+            stack.append({"type": btype, "id": ngy_id, "start": idx, "content": []})
+            continue
+
+        if end_m:
+            btype, ngy_id = end_m.group(1), end_m.group(2)
+            if not stack:
+                raise BlockMarkerError(
+                    f"対応する開始マーカーのない終了マーカーです: "
+                    f"{btype}終了 <{ngy_id}> ({idx + 1}行目)"
+                )
+            top = stack[-1]
+            if top["type"] != btype or top["id"] != ngy_id:
+                raise BlockMarkerError(
+                    f"マーカーが対応していません: "
+                    f"開始={top['type']}開始 <{top['id']}> ({top['start'] + 1}行目) に対し "
+                    f"終了={btype}終了 <{ngy_id}> ({idx + 1}行目)"
+                )
+            closed = stack.pop()
+            if stack:
+                # 入れ子ブロックが閉じた場合、そのブロック全体を親の内容として引き継ぐ
+                stack[-1]["content"].extend(lines[closed["start"]: idx + 1])
+            else:
+                before, after = _split_before_after(closed["content"], btype)
+                top_level.append(Block(btype, ngy_id, closed["start"], idx + 1, before, after))
+            continue
+
+        if stack:
+            stack[-1]["content"].append(line)
+
+    if stack:
+        unclosed = stack[-1]
+        raise BlockMarkerError(
+            f"閉じられていないブロックがあります: "
+            f"{unclosed['type']}開始 <{unclosed['id']}> ({unclosed['start'] + 1}行目)"
+        )
+
+    return top_level
+
+
+def _find_subsequence(a: Sequence[str], sub: Sequence[str], start: int) -> Optional[int]:
+    """a[start:] の中から sub と完全一致する連続部分列の開始位置を探す。"""
+    if not sub:
+        return start
+    n, m = len(a), len(sub)
+    for i in range(start, n - m + 1):
+        if a[i:i + m] == list(sub):
+            return i
+    return None
+
+
+def _lcs_opcodes(a: Sequence[str], b: Sequence[str]) -> List[Opcode]:
+    """difflib非依存のLCSベース行diff(動的計画法)。"""
+    n, m = len(a), len(b)
+    if n == 0 and m == 0:
+        return []
+
     dp = [[0] * (m + 1) for _ in range(n + 1)]
     for i in range(n - 1, -1, -1):
-        row = dp[i]
-        row_next = dp[i + 1]
-        ai = a[i]
+        row, row_next, ai = dp[i], dp[i + 1], a[i]
         for j in range(m - 1, -1, -1):
             if ai == b[j]:
                 row[j] = row_next[j + 1] + 1
             else:
                 row[j] = row[j + 1] if row[j + 1] >= row_next[j] else row_next[j]
 
-    # dpをたどって一致部分列(連続する一致はまとめてブロック化)を復元
     blocks: List[Tuple[int, int, int]] = []
     i = j = 0
     while i < n and j < m:
         if a[i] == b[j]:
-            start_i, start_j = i, j
+            si, sj = i, j
             while i < n and j < m and a[i] == b[j]:
                 i += 1
                 j += 1
-            blocks.append((start_i, start_j, i - start_i))
+            blocks.append((si, sj, i - si))
         elif dp[i + 1][j] >= dp[i][j + 1]:
             i += 1
         else:
             j += 1
     blocks.append((n, m, 0))
-    return blocks
 
-
-def _opcodes_from_matching_blocks(
-    blocks: Sequence[Tuple[int, int, int]]
-) -> List[Opcode]:
     opcodes: List[Opcode] = []
     i = j = 0
     for ai, bj, size in blocks:
@@ -157,32 +223,126 @@ def _opcodes_from_matching_blocks(
     return opcodes
 
 
-class _SimpleSequenceMatcher:
-    """difflib.SequenceMatcher の代替となる自前実装(LCSベース)。"""
+def _diff_with_blocks(
+    a: Sequence[str], b: Sequence[str], blocks: List[Block]
+) -> Tuple[List[Opcode], List[dict]]:
+    """ブロックを変更前(a)コードと対応付けながら全体のopcodesを組み立てる。
 
-    def __init__(
-        self,
-        isjunk: Optional[Callable] = None,
-        a: Sequence = "",
-        b: Sequence = "",
-        autojunk: bool = True,
-    ):
-        # isjunk と autojunk は difflib.SequenceMatcher とのシグネチャ互換のため
-        # 受け取るのみで、このシンプル実装では使用しない。
+    2段階で処理する:
+      1. before_lines を持つブロック(MOD/DEL)について、a側での対応位置
+         (アンカー)を先読みで確定させる。
+      2. アンカーを境界として、ブロックとブロックの間(通常コード部分)は
+         自前LCSで通常のdiffを行い、ブロック自体はそのアンカー位置に
+         対応付けて replace/insert/delete として出力する。
+
+    before_lines が無い(ADD)ブロックや、対応するコードが a 側に
+    見つからなかったブロックはアンカーを持たないため、次に見つかった
+    アンカー(無ければ a の末尾)までの区間をまとめて通常diffし、その
+    diffが終わった位置にブロックを挿入する。
+    """
+    # 1st pass: 各ブロックのアンカー(a側の一致位置)を先読みで求める
+    anchors: List[Tuple[Optional[int], int, bool]] = []
+    cursor = 0
+    for blk in blocks:
+        if blk.before_lines:
+            pos = _find_subsequence(a, blk.before_lines, cursor)
+            if pos is None:
+                anchors.append((None, 0, False))
+            else:
+                anchors.append((pos, len(blk.before_lines), True))
+                cursor = pos + len(blk.before_lines)
+        else:
+            anchors.append((None, 0, True))  # ADDは元コードが無いのが正解
+
+    # アンカーが無いブロックのために、後方にある最も近いアンカー位置を求めておく
+    upper_bounds: List[int] = [len(a)] * len(blocks)
+    next_known = len(a)
+    for idx in range(len(blocks) - 1, -1, -1):
+        pos, _, _ = anchors[idx]
+        if pos is not None:
+            next_known = pos
+        upper_bounds[idx] = next_known
+
+    opcodes: List[Opcode] = []
+    annotations: List[dict] = []
+    a_cursor = 0
+    b_cursor = 0
+
+    for blk, (pos, before_len, matched), upper in zip(blocks, anchors, upper_bounds):
+        gap_b_len = blk.start - b_cursor
+        if pos is not None:
+            gap_a_end = pos
+        else:
+            # アンカーが無い場合、直前の通常コード部分はほぼ1対1で並んでいる
+            # という前提で、gap_bと同じ行数だけ(次のアンカーを超えない範囲で)
+            # a側を対象にする。
+            gap_a_end = min(a_cursor + gap_b_len, upper)
+        gap_a = list(a[a_cursor:gap_a_end])
+        gap_b = list(b[b_cursor:blk.start])
+        for tag, gi1, gi2, gj1, gj2 in _lcs_opcodes(gap_a, gap_b):
+            opcodes.append((tag, a_cursor + gi1, a_cursor + gi2, b_cursor + gj1, b_cursor + gj2))
+
+        real_pos = pos if pos is not None else gap_a_end
+
+        if before_len == 0 and not blk.after_lines:
+            block_tag = None
+        elif before_len == 0:
+            block_tag = "insert"
+        elif not blk.after_lines:
+            block_tag = "delete"
+        else:
+            block_tag = "replace"
+
+        if block_tag:
+            opcodes.append((block_tag, real_pos, real_pos + before_len, blk.start, blk.end))
+
+        annotations.append(
+            {
+                "block_type": blk.block_type,
+                "ngy_id": blk.ngy_id,
+                "matched": matched,
+                "a_range": (real_pos, real_pos + before_len),
+                "b_range": (blk.start, blk.end),
+                "tag": block_tag,
+            }
+        )
+
+        a_cursor = real_pos + before_len
+        b_cursor = blk.end
+
+    gap_a = list(a[a_cursor:])
+    gap_b = list(b[b_cursor:])
+    for tag, gi1, gi2, gj1, gj2 in _lcs_opcodes(gap_a, gap_b):
+        opcodes.append((tag, a_cursor + gi1, a_cursor + gi2, b_cursor + gj1, b_cursor + gj2))
+
+    return opcodes, annotations
+
+
+class PlainSequenceMatcher:
+    """difflib.SequenceMatcher の代替となる、ブロックマーカーを扱わない
+    シンプルなLCSベースdiffクラス(difflib非依存)。"""
+
+    def __init__(self, isjunk=None, a: Sequence[str] = (), b: Sequence[str] = (), autojunk: bool = True):
         self.set_seqs(a, b)
 
-    def set_seqs(self, a: Sequence, b: Sequence) -> None:
+    def set_seqs(self, a: Sequence[str], b: Sequence[str]) -> None:
         self.a = list(a)
         self.b = list(b)
-
-    def get_matching_blocks(self) -> List[MatchingBlock]:
-        return _lcs_matching_blocks(self.a, self.b)
+        self._opcodes = _lcs_opcodes(self.a, self.b)
 
     def get_opcodes(self) -> List[Opcode]:
-        return _opcodes_from_matching_blocks(self.get_matching_blocks())
+        return list(self._opcodes)
+
+    def get_matching_blocks(self) -> List[MatchingBlock]:
+        blocks: List[MatchingBlock] = []
+        for tag, i1, i2, j1, j2 in self._opcodes:
+            if tag == "equal":
+                blocks.append((i1, j1, i2 - i1))
+        blocks.append((len(self.a), len(self.b), 0))
+        return blocks
 
     def ratio(self) -> float:
-        matches = sum(size for _, _, size in self.get_matching_blocks())
+        matches = sum(i2 - i1 for tag, i1, i2, j1, j2 in self._opcodes if tag == "equal")
         total = len(self.a) + len(self.b)
         return 2.0 * matches / total if total else 1.0
 
@@ -193,78 +353,62 @@ class _SimpleSequenceMatcher:
 class JavaBlockSequenceMatcher:
     """difflib.SequenceMatcher と互換のインタフェースを持つブロック単位diffクラス。
 
-    a は互換性のため受け取るが使用しない(difflib.SequenceMatcher(isjunk, a, b) 互換)。
+    b(通常は変更後/right側のファイル)にADD/MOD/DELマーカーが含まれている
+    ことを想定する。a(変更前/left側)は無印の通常コードでよい。
     """
 
     def __init__(
         self,
-        isjunk: Optional[Callable[[str], bool]] = None,
-        a: Sequence[str] = "",
-        b: Sequence[str] = "",
+        isjunk=None,
+        a: Sequence[str] = (),
+        b: Sequence[str] = (),
         autojunk: bool = True,
-        block_start: str = DEFAULT_BLOCK_START,
-        block_end: str = DEFAULT_BLOCK_END,
     ):
-        self.a = list(a)
-        self.b = list(b)
-        self._block_start_re = re.compile(block_start)
-        self._block_end_re = re.compile(block_end)
-        self._units_a = _group_units(self.a, self._block_start_re, self._block_end_re)
-        self._units_b = _group_units(self.b, self._block_start_re, self._block_end_re)
-        self._sm = _SimpleSequenceMatcher(
-            isjunk, self._units_a, self._units_b, autojunk=autojunk
-        )
+        # isjunk / autojunk は difflib.SequenceMatcher とのシグネチャ互換のために
+        # 受け取るのみで、このシンプル実装では使用しない。
+        self.set_seqs(a, b)
 
     def set_seqs(self, a: Sequence[str], b: Sequence[str]) -> None:
         self.a = list(a)
         self.b = list(b)
-        self._units_a = _group_units(self.a, self._block_start_re, self._block_end_re)
-        self._units_b = _group_units(self.b, self._block_start_re, self._block_end_re)
-        self._sm.set_seqs(self._units_a, self._units_b)
+        # マーカーのペア崩れはどちら側にあってもエラーにする
+        parse_blocks(self.a)
+        self._blocks = parse_blocks(self.b)
+        self._opcodes, self._annotations = _diff_with_blocks(self.a, self.b, self._blocks)
 
     def get_opcodes(self) -> List[Opcode]:
-        opcodes: List[Opcode] = []
-        for tag, ui1, ui2, uj1, uj2 in self._sm.get_opcodes():
-            i1 = self._units_a[ui1].start if ui1 < len(self._units_a) else len(self.a)
-            i2 = self._units_a[ui2 - 1].end if ui2 > ui1 else i1
-            j1 = self._units_b[uj1].start if uj1 < len(self._units_b) else len(self.b)
-            j2 = self._units_b[uj2 - 1].end if uj2 > uj1 else j1
-            opcodes.append((tag, i1, i2, j1, j2))
-        return opcodes
+        return list(self._opcodes)
 
     def get_matching_blocks(self) -> List[MatchingBlock]:
         blocks: List[MatchingBlock] = []
-        for ui, uj, size in self._sm.get_matching_blocks():
-            if size == 0:
-                blocks.append((len(self.a), len(self.b), 0))
-                continue
-            i = self._units_a[ui].start
-            j = self._units_b[uj].start
-            length = self._units_a[ui + size - 1].end - i
-            blocks.append((i, j, length))
+        for tag, i1, i2, j1, j2 in self._opcodes:
+            if tag == "equal":
+                blocks.append((i1, j1, i2 - i1))
+        blocks.append((len(self.a), len(self.b), 0))
         return blocks
 
+    def get_block_annotations(self) -> List[dict]:
+        """ADD/MOD/DELブロックと変更前コードの対応付け一覧を返す(difflibにはない拡張)。"""
+        return list(self._annotations)
+
     def ratio(self) -> float:
-        return self._sm.ratio()
+        matches = sum(i2 - i1 for tag, i1, i2, j1, j2 in self._opcodes if tag == "equal")
+        total = len(self.a) + len(self.b)
+        return 2.0 * matches / total if total else 1.0
 
-    def quick_ratio(self) -> float:
-        return self._sm.quick_ratio()
-
-    def real_quick_ratio(self) -> float:
-        return self._sm.real_quick_ratio()
+    quick_ratio = ratio
+    real_quick_ratio = ratio
 
 
 def java_block_diff(
     a: Sequence[str],
     b: Sequence[str],
-    block_start: str = DEFAULT_BLOCK_START,
-    block_end: str = DEFAULT_BLOCK_END,
     lineterm: str = "\n",
     fromfile: str = "",
     tofile: str = "",
 ) -> List[str]:
     """unified diff相当の出力を、ブロック単位で生成するヘルパー。"""
-    sm = JavaBlockSequenceMatcher(None, a, b, block_start=block_start, block_end=block_end)
+    sm = JavaBlockSequenceMatcher(None, a, b)
     out: List[str] = []
     if fromfile or tofile:
         out.append(f"--- {fromfile}{lineterm}")
@@ -290,33 +434,47 @@ def read_lines(path: str, encoding: str) -> List[str]:
 
 def main(argv: Optional[List[str]] = None) -> int:
     p = argparse.ArgumentParser(
-        description="Javaのブロック(ADD START/ENDなど)単位でdiffを出すツール"
+        description="Javaのブロック(ADD/MOD/DEL開始・終了 <NGY-xxx>)単位でdiffを出すツール"
     )
     p.add_argument("left")
     p.add_argument("right")
-    p.add_argument("--block-start", default=DEFAULT_BLOCK_START, help="ブロック開始コメントの正規表現")
-    p.add_argument("--block-end", default=DEFAULT_BLOCK_END, help="ブロック終了コメントの正規表現")
     p.add_argument("--encoding", default="utf-8")
     p.add_argument("-o", "--output", default=None)
+    p.add_argument(
+        "--show-blocks",
+        action="store_true",
+        help="ADD/MOD/DELブロックと変更前コードの対応付け情報を併せて表示する",
+    )
     args = p.parse_args(argv)
 
     left_lines = read_lines(args.left, args.encoding)
     right_lines = read_lines(args.right, args.encoding)
 
-    diff_lines = java_block_diff(
-        left_lines,
-        right_lines,
-        block_start=args.block_start,
-        block_end=args.block_end,
-        fromfile=args.left,
-        tofile=args.right,
-    )
+    try:
+        sm = JavaBlockSequenceMatcher(None, left_lines, right_lines)
+    except BlockMarkerError as e:
+        print(f"エラー: {e}", file=sys.stderr)
+        return 1
+
+    diff_lines = java_block_diff(left_lines, right_lines, fromfile=args.left, tofile=args.right)
 
     if args.output:
         with open(args.output, "w", encoding=args.encoding, newline="") as f:
             f.writelines(diff_lines)
     else:
         sys.stdout.writelines(diff_lines)
+
+    if args.show_blocks:
+        for ann in sm.get_block_annotations():
+            a1, a2 = ann["a_range"]
+            b1, b2 = ann["b_range"]
+            matched = "OK" if ann["matched"] else "対応行が見つかりません"
+            print(
+                f"# {ann['block_type']} <{ann['ngy_id']}>: "
+                f"left[{a1}:{a2}] <-> right[{b1}:{b2}] ({matched})",
+                file=sys.stderr,
+            )
+
     return 0
 
 
