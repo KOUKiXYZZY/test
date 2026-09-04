@@ -337,28 +337,50 @@ def _diff_with_blocks_left(
     """a(left)側にADD/MOD/DELマーカーがある場合の対応付けdiff。
 
     ブロックのa側範囲はマーカー自体から確定済み(探索不要)なので、
-    ブロックのafter_lines(変更後のコード)がb(right, 無印ファイル)側の
-    どこに対応するかを先読みで探し、アンカーとする。
-    DELブロックはafter_linesが無い(=削除された)ため、常にb側では
-    アンカー無し(=削除扱い)になる。
+    b(right, 無印ファイル)側のどこに対応するかを先読みで探し、アンカーとする。
+
+    MOD/DEL は before_lines(コメントを外した変更前コード)を優先的に
+    b 側から探す。ここではっきり一致した場合は、まだ変更が反映されて
+    いない = 実質的に差分が無いとみなし、tag は "equal" として扱う。
+    before_lines で見つからなかった場合(MODのみ)は、代わりに
+    after_lines(変更後コード)を探し、見つかれば変更が反映済みとして
+    "replace" として扱う。
+    ADD ブロックは before_lines を持たないため after_lines のみを探す。
+    DEL ブロックは after_lines を持たないため before_lines のみを探す
+    (見つからなければ削除済みとみなし "delete" になる)。
     """
-    anchors: List[Tuple[Optional[int], int, bool]] = []
+    anchors: List[Tuple[Optional[int], int, bool, Optional[str]]] = []
     cursor = 0
     for blk in blocks:
-        if blk.after_lines:
+        pos = None
+        length = 0
+        tag: Optional[str] = None
+
+        if blk.before_lines:
+            pos = _find_subsequence(b, blk.before_lines, cursor)
+            if pos is not None:
+                length = len(blk.before_lines)
+                tag = "equal"
+
+        if pos is None and blk.after_lines:
             pos = _find_subsequence(b, blk.after_lines, cursor)
-            if pos is None:
-                anchors.append((None, 0, False))
-            else:
-                anchors.append((pos, len(blk.after_lines), True))
-                cursor = pos + len(blk.after_lines)
+            if pos is not None:
+                length = len(blk.after_lines)
+                tag = "replace"
+
+        if pos is None:
+            # DELでbefore(削除対象コード)がb側に見つからないのは、
+            # 既に削除が反映されている正常な状態なのでmatched扱いにする
+            matched_flag = blk.block_type == "DEL"
+            anchors.append((None, 0, matched_flag, None))
         else:
-            anchors.append((None, 0, True))  # DELは変更後コードが無いのが正解
+            anchors.append((pos, length, True, tag))
+            cursor = pos + length
 
     upper_bounds: List[int] = [len(b)] * len(blocks)
     next_known = len(b)
     for idx in range(len(blocks) - 1, -1, -1):
-        pos, _, _ = anchors[idx]
+        pos, _, _, _ = anchors[idx]
         if pos is not None:
             next_known = pos
         upper_bounds[idx] = next_known
@@ -368,7 +390,7 @@ def _diff_with_blocks_left(
     a_cursor = 0
     b_cursor = 0
 
-    for blk, (pos, after_len, matched), upper in zip(blocks, anchors, upper_bounds):
+    for blk, (pos, match_len, matched, match_tag), upper in zip(blocks, anchors, upper_bounds):
         gap_a_len = blk.start - a_cursor
         if pos is not None:
             gap_b_end = pos
@@ -384,10 +406,14 @@ def _diff_with_blocks_left(
 
         real_pos = pos if pos is not None else gap_b_end
 
-        # ブロックのa側は(マーカー行を含めて)常に非空なので insert にはならない
-        block_tag = "delete" if after_len == 0 else "replace"
+        if match_tag is not None:
+            # before/afterのどちらかがb側とはっきり一致した
+            block_tag = match_tag  # "equal"(before一致) または "replace"(after一致)
+        else:
+            # ブロックのa側は(マーカー行を含めて)常に非空なので insert にはならない
+            block_tag = "delete" if match_len == 0 else "replace"
 
-        opcodes.append((block_tag, blk.start, blk.end, real_pos, real_pos + after_len))
+        opcodes.append((block_tag, blk.start, blk.end, real_pos, real_pos + match_len))
 
         annotations.append(
             {
@@ -395,13 +421,13 @@ def _diff_with_blocks_left(
                 "ngy_id": blk.ngy_id,
                 "matched": matched,
                 "a_range": (blk.start, blk.end),
-                "b_range": (real_pos, real_pos + after_len),
+                "b_range": (real_pos, real_pos + match_len),
                 "tag": block_tag,
             }
         )
 
         a_cursor = blk.end
-        b_cursor = real_pos + after_len
+        b_cursor = real_pos + match_len
 
     gap_a = list(a[a_cursor:])
     gap_b = list(b[b_cursor:])
@@ -483,9 +509,13 @@ class JavaBlockSequenceMatcher:
         return list(self._opcodes)
 
     def get_matching_blocks(self) -> List[MatchingBlock]:
+        # MOD/DELブロックのbefore一致による"equal"は、aの範囲(マーカー等を
+        # 含む)とbの範囲の長さが一致しないことがある。difflib本来の
+        # matching_blocksは長さが両側で同じ一致区間のみを表すため、
+        # ここではその厳密な意味を保つ区間のみを対象にする。
         blocks: List[MatchingBlock] = []
         for tag, i1, i2, j1, j2 in self._opcodes:
-            if tag == "equal":
+            if tag == "equal" and (i2 - i1) == (j2 - j1):
                 blocks.append((i1, j1, i2 - i1))
         blocks.append((len(self.a), len(self.b), 0))
         return blocks
@@ -495,7 +525,9 @@ class JavaBlockSequenceMatcher:
         return list(self._annotations)
 
     def ratio(self) -> float:
-        matches = sum(i2 - i1 for tag, i1, i2, j1, j2 in self._opcodes if tag == "equal")
+        matches = sum(
+            min(i2 - i1, j2 - j1) for tag, i1, i2, j1, j2 in self._opcodes if tag == "equal"
+        )
         total = len(self.a) + len(self.b)
         return 2.0 * matches / total if total else 1.0
 

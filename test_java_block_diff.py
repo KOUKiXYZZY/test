@@ -311,6 +311,7 @@ after
         self.assertEqual(anns[0]["b_range"], (1, 1))
 
     def test_mod_block_on_left_maps_to_right_code(self):
+        # 右側は変更後コード(int x = 2;)が既に反映されているケース -> replace
         a = L(
             """
 before
@@ -330,7 +331,70 @@ after
         anns = sm.get_block_annotations()
         self.assertEqual(anns[0]["block_type"], "MOD")
         self.assertTrue(anns[0]["matched"])
+        self.assertEqual(anns[0]["tag"], "replace")
         self.assertEqual(anns[0]["b_range"], (1, 2))
+
+    def test_mod_block_before_matches_right_is_equal(self):
+        # 右側がまだ変更前のコード(int x = 1;)のままのケース -> はっきり
+        # 一致するのでequal扱い(未反映だが差分なしとみなす)
+        a = L(
+            """
+before
+// MOD開始 <NGY-010>
+// int x = 1;
+int x = 2;
+// MOD終了 <NGY-010>
+after
+"""
+        )
+        b = L("before\nint x = 1;\nafter")
+        sm = JavaBlockSequenceMatcher(None, a, b)
+        ops = sm.get_opcodes()
+        self.assertIn(("equal", 1, 5, 1, 2), ops)
+
+        anns = sm.get_block_annotations()
+        self.assertEqual(anns[0]["tag"], "equal")
+        self.assertTrue(anns[0]["matched"])
+        self.assertEqual(anns[0]["b_range"], (1, 2))
+
+    def test_del_block_before_matches_right_is_equal(self):
+        # 右側にまだ削除対象のコードが残っているケース -> はっきり一致するのでequal
+        a = L(
+            """
+before
+// DEL開始 <NGY-020>
+// int unused = 0;
+// DEL終了 <NGY-020>
+after
+"""
+        )
+        b = L("before\nint unused = 0;\nafter")
+        sm = JavaBlockSequenceMatcher(None, a, b)
+        ops = sm.get_opcodes()
+        self.assertIn(("equal", 1, 4, 1, 2), ops)
+
+        anns = sm.get_block_annotations()
+        self.assertEqual(anns[0]["tag"], "equal")
+        self.assertTrue(anns[0]["matched"])
+
+    def test_matching_blocks_and_ratio_ignore_length_mismatched_equal(self):
+        # equalタグでもa/bの長さが違う場合はget_matching_blocksの対象外
+        a = L(
+            """
+before
+// MOD開始 <NGY-010>
+// int x = 1;
+int x = 2;
+// MOD終了 <NGY-010>
+after
+"""
+        )
+        b = L("before\nint x = 1;\nafter")
+        sm = JavaBlockSequenceMatcher(None, a, b)
+        for (i1, j1, size) in sm.get_matching_blocks():
+            # 長さが不一致の疑似equalは含まれないはず
+            self.assertNotEqual((i1, j1, size), (1, 1, 4))
+        self.assertLess(sm.ratio(), 1.0)
 
     def test_del_block_on_left_has_nothing_on_right(self):
         a = L(
