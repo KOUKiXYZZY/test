@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # usage: python smart_merge.py left.txt right.txt "キーワード" -o merged.txt
 import argparse
-import difflib
 import sys
+
+from java_block_diff import _SimpleSequenceMatcher
 
 def smart_merge(left_lines, right_lines, keyword):
     """差分ブロックごとに、左側にキーワードがあれば左を、なければ右を採用する"""
-    sm = difflib.SequenceMatcher(None, left_lines, right_lines, autojunk=False)
+    sm = _SimpleSequenceMatcher(None, left_lines, right_lines, autojunk=False)
     merged = []
 
     for tag, i1, i2, j1, j2 in sm.get_opcodes():

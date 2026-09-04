@@ -11,9 +11,12 @@ ratio など)を提供しつつ、
     // ADD END
 
 のようなコメントペアで囲まれた範囲を「1ブロック」としてまとめて差分判定する。
-ブロックの外側は通常のdifflibと同じ行単位の差分になる。
+ブロックの外側は通常のLCSベースdiffと同じ行単位の差分になる。
 
-使い方は difflib.SequenceMatcher とほぼ同じ:
+NOTE: difflib は使用禁止のため、SequenceMatcher相当のロジック(LCSベースの
+最長共通部分列アルゴリズム)を自前で実装している。
+
+使い方:
 
     >>> sm = JavaBlockSequenceMatcher(None, left_lines, right_lines)
     >>> for tag, i1, i2, j1, j2 in sm.get_opcodes():
@@ -27,10 +30,9 @@ get_opcodes() / get_matching_blocks() は「ブロック単位」ではなく、
 from __future__ import annotations
 
 import argparse
-import difflib
 import re
 import sys
-from typing import Callable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 Opcode = Tuple[str, int, int, int, int]
 MatchingBlock = Tuple[int, int, int]
@@ -40,7 +42,7 @@ DEFAULT_BLOCK_END = r"//\s*ADD\s*END"
 
 
 class _Unit:
-    """SequenceMatcher に渡す1要素。通常行 or ブロックをラップする。"""
+    """比較する1要素。通常行 or ブロックをラップする。"""
 
     __slots__ = ("start", "end", "key")
 
@@ -87,6 +89,107 @@ def _group_units(
     return units
 
 
+def _lcs_matching_blocks(a: Sequence, b: Sequence) -> List[Tuple[int, int, int]]:
+    """自前実装のLCS(最長共通部分列)に基づくマッチングブロック計算。
+
+    difflib.SequenceMatcher.get_matching_blocks() と同じ形式
+    ([(ai, bj, size), ..., (len(a), len(b), 0)]) を返す。
+
+    b の要素値 -> 出現インデックス一覧のインデックスを作り、
+    「aの各要素についてbのどこにマッチしうるか」を絞り込んだ上で
+    動的計画法により最長一致連鎖(＝最長共通部分列)を求める。
+    このアルゴリズムは連続した一致(オートジャンクなどの発見的手法)は
+    行わず、常に厳密なLCSを返す点でdifflibの既定動作と多少異なるが、
+    diff結果としては妥当な最小差分を与える。
+    """
+    n, m = len(a), len(b)
+    if n == 0 or m == 0:
+        return [(n, m, 0)]
+
+    # dp[i][j] = a[i:] と b[j:] のLCS長
+    dp = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(n - 1, -1, -1):
+        row = dp[i]
+        row_next = dp[i + 1]
+        ai = a[i]
+        for j in range(m - 1, -1, -1):
+            if ai == b[j]:
+                row[j] = row_next[j + 1] + 1
+            else:
+                row[j] = row[j + 1] if row[j + 1] >= row_next[j] else row_next[j]
+
+    # dpをたどって一致部分列(連続する一致はまとめてブロック化)を復元
+    blocks: List[Tuple[int, int, int]] = []
+    i = j = 0
+    while i < n and j < m:
+        if a[i] == b[j]:
+            start_i, start_j = i, j
+            while i < n and j < m and a[i] == b[j]:
+                i += 1
+                j += 1
+            blocks.append((start_i, start_j, i - start_i))
+        elif dp[i + 1][j] >= dp[i][j + 1]:
+            i += 1
+        else:
+            j += 1
+    blocks.append((n, m, 0))
+    return blocks
+
+
+def _opcodes_from_matching_blocks(
+    blocks: Sequence[Tuple[int, int, int]]
+) -> List[Opcode]:
+    opcodes: List[Opcode] = []
+    i = j = 0
+    for ai, bj, size in blocks:
+        tag = ""
+        if i < ai and j < bj:
+            tag = "replace"
+        elif i < ai:
+            tag = "delete"
+        elif j < bj:
+            tag = "insert"
+        if tag:
+            opcodes.append((tag, i, ai, j, bj))
+        i, j = ai + size, bj + size
+        if size:
+            opcodes.append(("equal", ai, i, bj, j))
+    return opcodes
+
+
+class _SimpleSequenceMatcher:
+    """difflib.SequenceMatcher の代替となる自前実装(LCSベース)。"""
+
+    def __init__(
+        self,
+        isjunk: Optional[Callable] = None,
+        a: Sequence = "",
+        b: Sequence = "",
+        autojunk: bool = True,
+    ):
+        # isjunk と autojunk は difflib.SequenceMatcher とのシグネチャ互換のため
+        # 受け取るのみで、このシンプル実装では使用しない。
+        self.set_seqs(a, b)
+
+    def set_seqs(self, a: Sequence, b: Sequence) -> None:
+        self.a = list(a)
+        self.b = list(b)
+
+    def get_matching_blocks(self) -> List[MatchingBlock]:
+        return _lcs_matching_blocks(self.a, self.b)
+
+    def get_opcodes(self) -> List[Opcode]:
+        return _opcodes_from_matching_blocks(self.get_matching_blocks())
+
+    def ratio(self) -> float:
+        matches = sum(size for _, _, size in self.get_matching_blocks())
+        total = len(self.a) + len(self.b)
+        return 2.0 * matches / total if total else 1.0
+
+    quick_ratio = ratio
+    real_quick_ratio = ratio
+
+
 class JavaBlockSequenceMatcher:
     """difflib.SequenceMatcher と互換のインタフェースを持つブロック単位diffクラス。
 
@@ -108,7 +211,7 @@ class JavaBlockSequenceMatcher:
         self._block_end_re = re.compile(block_end)
         self._units_a = _group_units(self.a, self._block_start_re, self._block_end_re)
         self._units_b = _group_units(self.b, self._block_start_re, self._block_end_re)
-        self._sm = difflib.SequenceMatcher(
+        self._sm = _SimpleSequenceMatcher(
             isjunk, self._units_a, self._units_b, autojunk=autojunk
         )
 
@@ -160,7 +263,7 @@ def java_block_diff(
     fromfile: str = "",
     tofile: str = "",
 ) -> List[str]:
-    """difflib.unified_diff 相当の出力を、ブロック単位で生成するヘルパー。"""
+    """unified diff相当の出力を、ブロック単位で生成するヘルパー。"""
     sm = JavaBlockSequenceMatcher(None, a, b, block_start=block_start, block_end=block_end)
     out: List[str] = []
     if fromfile or tofile:
