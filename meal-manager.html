@@ -242,10 +242,12 @@
 
     <div class="card">
       <h2>食事を追加</h2>
+      <div class="save-note" id="foodHint" style="margin-bottom:8px;">料理名を入力すると候補一覧から選べます。選ぶとカロリー等が自動入力されます(手動修正もOK)。</div>
       <form class="entry-form" id="entryForm">
         <div>
           <label>料理名</label>
-          <input type="text" id="foodName" required placeholder="例: 白米">
+          <input type="text" id="foodName" list="foodList" required placeholder="例: 白米(入力すると候補表示)" autocomplete="off">
+          <datalist id="foodList"></datalist>
         </div>
         <div>
           <label>区分</label>
@@ -255,6 +257,10 @@
             <option value="夕食">夕食</option>
             <option value="間食">間食</option>
           </select>
+        </div>
+        <div>
+          <label>量(g)</label>
+          <input type="number" id="grams" min="0" step="1" value="100">
         </div>
         <div>
           <label>カロリー(kcal)</label>
@@ -277,7 +283,7 @@
       <table id="entryTable">
         <thead>
           <tr>
-            <th>区分</th><th>料理名</th><th class="num">kcal</th><th class="num">P(g)</th><th class="num">F(g)</th><th></th>
+            <th>区分</th><th>料理名</th><th class="num">量(g)</th><th class="num">kcal</th><th class="num">P(g)</th><th class="num">F(g)</th><th></th>
           </tr>
         </thead>
         <tbody id="entryTbody"></tbody>
@@ -337,6 +343,53 @@
   "use strict";
 
   var STORAGE_KEY = "mealManagerData_v1";
+
+  /* ---------- 食品データベース(可食部100gあたり: kcal, たんぱく質g, 脂質/糖質g) ---------- */
+  var FOOD_DB = [
+    { name: "白米(ご飯)", cal: 156, protein: 2.5, fat: 0.3 },
+    { name: "玄米ご飯", cal: 152, protein: 2.8, fat: 1.0 },
+    { name: "食パン", cal: 264, protein: 9.3, fat: 4.4 },
+    { name: "うどん(ゆで)", cal: 105, protein: 2.6, fat: 0.4 },
+    { name: "そば(ゆで)", cal: 132, protein: 4.8, fat: 1.0 },
+    { name: "パスタ(ゆで)", cal: 165, protein: 5.8, fat: 0.9 },
+    { name: "鶏むね肉(皮なし)", cal: 116, protein: 23.3, fat: 1.9 },
+    { name: "鶏もも肉(皮つき)", cal: 200, protein: 16.6, fat: 14.2 },
+    { name: "鶏ささみ", cal: 105, protein: 23.9, fat: 0.8 },
+    { name: "豚ロース肉", cal: 263, protein: 19.3, fat: 19.2 },
+    { name: "豚バラ肉", cal: 386, protein: 14.2, fat: 34.6 },
+    { name: "牛もも肉", cal: 196, protein: 21.3, fat: 12.6 },
+    { name: "牛ひき肉", cal: 251, protein: 17.1, fat: 19.8 },
+    { name: "卵(鶏卵)", cal: 151, protein: 12.3, fat: 10.3 },
+    { name: "鮭(サケ)", cal: 133, protein: 22.3, fat: 4.1 },
+    { name: "サバ", cal: 202, protein: 20.7, fat: 12.1 },
+    { name: "マグロ(赤身)", cal: 125, protein: 26.4, fat: 1.4 },
+    { name: "エビ", cal: 82, protein: 18.4, fat: 0.6 },
+    { name: "豆腐(絹ごし)", cal: 56, protein: 4.9, fat: 3.0 },
+    { name: "納豆", cal: 190, protein: 16.5, fat: 10.0 },
+    { name: "牛乳", cal: 61, protein: 3.3, fat: 3.8 },
+    { name: "ヨーグルト(無糖)", cal: 56, protein: 3.6, fat: 3.0 },
+    { name: "プロセスチーズ", cal: 313, protein: 22.7, fat: 26.0 },
+    { name: "じゃがいも", cal: 76, protein: 1.6, fat: 0.1 },
+    { name: "さつまいも", cal: 126, protein: 1.2, fat: 0.2 },
+    { name: "キャベツ", cal: 21, protein: 1.3, fat: 0.2 },
+    { name: "レタス", cal: 12, protein: 0.6, fat: 0.1 },
+    { name: "トマト", cal: 19, protein: 0.7, fat: 0.1 },
+    { name: "きゅうり", cal: 13, protein: 1.0, fat: 0.1 },
+    { name: "にんじん", cal: 35, protein: 0.6, fat: 0.1 },
+    { name: "たまねぎ", cal: 33, protein: 0.9, fat: 0.1 },
+    { name: "ブロッコリー", cal: 33, protein: 4.3, fat: 0.5 },
+    { name: "バナナ", cal: 93, protein: 1.1, fat: 0.2 },
+    { name: "りんご", cal: 53, protein: 0.1, fat: 0.1 },
+    { name: "みかん", cal: 46, protein: 0.7, fat: 0.1 },
+    { name: "味噌汁", cal: 40, protein: 2.9, fat: 1.2 },
+    { name: "カレーライス(1皿)", cal: 780, protein: 18.0, fat: 27.0 },
+    { name: "ラーメン(1杯)", cal: 500, protein: 20.0, fat: 15.0 },
+    { name: "ハンバーガー(1個)", cal: 280, protein: 13.0, fat: 12.0 },
+    { name: "ポテトチップス", cal: 554, protein: 4.7, fat: 35.2 },
+    { name: "チョコレート", cal: 550, protein: 6.0, fat: 34.0 }
+  ];
+  var FOOD_DB_MAP = {};
+  FOOD_DB.forEach(function (f) { FOOD_DB_MAP[f.name] = f; });
 
   /* ---------- データ層 ---------- */
   function loadData() {
@@ -402,6 +455,30 @@
   var goalCaloriesInput = document.getElementById("goalCalories");
   var goalProteinInput = document.getElementById("goalProtein");
   var goalFatInput = document.getElementById("goalFat");
+  var foodNameInput = document.getElementById("foodName");
+  var gramsInput = document.getElementById("grams");
+  var caloriesInput = document.getElementById("calories");
+  var proteinInput = document.getElementById("protein");
+  var fatInput = document.getElementById("fat");
+  var foodListEl = document.getElementById("foodList");
+
+  /* ---------- 食品データベース連携 ---------- */
+  foodListEl.innerHTML = FOOD_DB.map(function (f) {
+    return '<option value="' + escapeHtml(f.name) + '"></option>';
+  }).join("");
+
+  function applyFoodAutoFill() {
+    var food = FOOD_DB_MAP[foodNameInput.value.trim()];
+    if (!food) return;
+    var grams = parseFloat(gramsInput.value) || 0;
+    var ratio = grams / 100;
+    caloriesInput.value = Math.round(food.cal * ratio);
+    proteinInput.value = (food.protein * ratio).toFixed(1);
+    fatInput.value = (food.fat * ratio).toFixed(1);
+  }
+  foodNameInput.addEventListener("input", applyFoodAutoFill);
+  foodNameInput.addEventListener("change", applyFoodAutoFill);
+  gramsInput.addEventListener("input", applyFoodAutoFill);
 
   /* ---------- タブ切替 ---------- */
   document.querySelectorAll(".tab-btn").forEach(function (btn) {
@@ -439,11 +516,12 @@
   /* ---------- 記録追加 ---------- */
   entryForm.addEventListener("submit", function (e) {
     e.preventDefault();
-    var name = document.getElementById("foodName").value.trim();
+    var name = foodNameInput.value.trim();
     var mealType = document.getElementById("mealType").value;
-    var cal = parseFloat(document.getElementById("calories").value) || 0;
-    var protein = parseFloat(document.getElementById("protein").value) || 0;
-    var fat = parseFloat(document.getElementById("fat").value) || 0;
+    var grams = parseFloat(gramsInput.value) || 0;
+    var cal = parseFloat(caloriesInput.value) || 0;
+    var protein = parseFloat(proteinInput.value) || 0;
+    var fat = parseFloat(fatInput.value) || 0;
     if (!name) return;
 
     if (!state.entries[currentDate]) state.entries[currentDate] = [];
@@ -451,6 +529,7 @@
       id: uid(),
       name: name,
       mealType: mealType,
+      grams: grams,
       calories: cal,
       protein: protein,
       fat: fat
@@ -458,6 +537,7 @@
     saveData();
     entryForm.reset();
     document.getElementById("mealType").value = mealType;
+    gramsInput.value = 100;
     renderDaily();
   });
 
@@ -504,6 +584,7 @@
         tr.innerHTML =
           '<td><span class="meal-tag">' + escapeHtml(en.mealType) + '</span></td>' +
           '<td>' + escapeHtml(en.name) + '</td>' +
+          '<td class="num">' + (en.grams ? Math.round(en.grams) : "-") + '</td>' +
           '<td class="num">' + Math.round(en.calories) + '</td>' +
           '<td class="num">' + en.protein.toFixed(1) + '</td>' +
           '<td class="num">' + en.fat.toFixed(1) + '</td>' +
