@@ -1,0 +1,628 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>食事管理アプリ</title>
+<style>
+  :root {
+    --primary: #ff8a5b;
+    --primary-dark: #e8703c;
+    --bg: #fdf6f0;
+    --card: #ffffff;
+    --text: #3a3a3a;
+    --muted: #8a8a8a;
+    --border: #eee0d5;
+    --success: #6bbf8e;
+    --danger: #e26d6d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Hiragino Kaku Gothic ProN", "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding-bottom: 40px;
+  }
+  header {
+    background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+    color: white;
+    padding: 24px 16px;
+    text-align: center;
+  }
+  header h1 { margin: 0; font-size: 1.6em; }
+  header p { margin: 4px 0 0; opacity: 0.9; font-size: 0.9em; }
+
+  .container { max-width: 900px; margin: 0 auto; padding: 16px; }
+
+  .card {
+    background: var(--card);
+    border-radius: 12px;
+    padding: 16px;
+    margin-bottom: 16px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+    border: 1px solid var(--border);
+  }
+
+  .card h2 { margin-top: 0; font-size: 1.1em; }
+
+  .date-nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .date-nav button {
+    background: var(--primary);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    padding: 8px 14px;
+    cursor: pointer;
+    font-size: 1em;
+  }
+  .date-nav input[type=date] {
+    flex: 1;
+    padding: 8px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    font-size: 1em;
+  }
+
+  .summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
+    gap: 10px;
+    margin-top: 12px;
+  }
+  .summary-item {
+    background: var(--bg);
+    border-radius: 10px;
+    padding: 10px;
+    text-align: center;
+  }
+  .summary-item .label { font-size: 0.75em; color: var(--muted); }
+  .summary-item .value { font-size: 1.2em; font-weight: bold; margin-top: 2px; }
+
+  .goal-bar-wrap { margin-top: 12px; }
+  .goal-bar-bg {
+    background: var(--border);
+    border-radius: 8px;
+    height: 14px;
+    overflow: hidden;
+  }
+  .goal-bar-fill {
+    height: 100%;
+    background: var(--success);
+    transition: width 0.3s;
+  }
+  .goal-bar-fill.over { background: var(--danger); }
+  .goal-text { font-size: 0.8em; color: var(--muted); margin-top: 4px; text-align: right; }
+
+  form.entry-form {
+    display: grid;
+    grid-template-columns: 2fr 1fr 1fr 1fr 1fr auto;
+    gap: 8px;
+    align-items: end;
+  }
+  form.entry-form label {
+    font-size: 0.75em;
+    color: var(--muted);
+    display: block;
+    margin-bottom: 2px;
+  }
+  form.entry-form input, form.entry-form select {
+    width: 100%;
+    padding: 8px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    font-size: 0.95em;
+  }
+  form.entry-form button {
+    background: var(--primary);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    padding: 9px 14px;
+    cursor: pointer;
+    font-weight: bold;
+  }
+  form.entry-form button:hover { background: var(--primary-dark); }
+
+  @media (max-width: 640px) {
+    form.entry-form { grid-template-columns: 1fr 1fr; }
+  }
+
+  table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); font-size: 0.9em; }
+  th { color: var(--muted); font-weight: 600; font-size: 0.8em; }
+  td.num { text-align: right; }
+  .meal-tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 0.75em;
+    background: #ffe6d5;
+    color: var(--primary-dark);
+  }
+  .del-btn {
+    background: none;
+    border: none;
+    color: var(--danger);
+    cursor: pointer;
+    font-size: 1em;
+  }
+  .empty-msg { color: var(--muted); text-align: center; padding: 20px 0; font-size: 0.9em; }
+
+  .settings-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+    gap: 10px;
+  }
+  .settings-row label { font-size: 0.75em; color: var(--muted); display:block; margin-bottom:2px; }
+  .settings-row input {
+    width: 100%;
+    padding: 8px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+  }
+  .save-note { font-size: 0.75em; color: var(--muted); margin-top: 8px; }
+
+  .tab-bar {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+  }
+  .tab-bar button {
+    flex: 1;
+    min-width: 100px;
+    padding: 10px;
+    border: 1px solid var(--border);
+    background: var(--card);
+    border-radius: 10px;
+    cursor: pointer;
+    font-weight: bold;
+    color: var(--muted);
+  }
+  .tab-bar button.active {
+    background: var(--primary);
+    color: white;
+    border-color: var(--primary);
+  }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  .history-list li { margin-bottom: 6px; }
+  .actions-row { display:flex; gap:8px; margin-top: 10px; }
+  .actions-row button {
+    background: var(--card);
+    border: 1px solid var(--border);
+    padding: 8px 12px;
+    border-radius: 8px;
+    cursor: pointer;
+    color: var(--text);
+  }
+  .actions-row button.danger { color: var(--danger); border-color: var(--danger); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🍚 食事管理アプリ</h1>
+  <p>毎日の食事とカロリーを記録しよう</p>
+</header>
+
+<div class="container">
+
+  <div class="tab-bar">
+    <button class="tab-btn active" data-tab="daily">今日の記録</button>
+    <button class="tab-btn" data-tab="history">履歴</button>
+    <button class="tab-btn" data-tab="settings">設定</button>
+  </div>
+
+  <!-- 日次タブ -->
+  <div class="tab-panel active" id="tab-daily">
+
+    <div class="card">
+      <div class="date-nav">
+        <button id="prevDay">◀</button>
+        <input type="date" id="dateInput">
+        <button id="nextDay">▶</button>
+        <button id="todayBtn">今日</button>
+      </div>
+
+      <div class="summary-grid" id="summaryGrid"></div>
+
+      <div class="goal-bar-wrap">
+        <div class="goal-bar-bg"><div class="goal-bar-fill" id="goalBarFill" style="width:0%"></div></div>
+        <div class="goal-text" id="goalText"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>食事を追加</h2>
+      <form class="entry-form" id="entryForm">
+        <div>
+          <label>料理名</label>
+          <input type="text" id="foodName" required placeholder="例: 白米">
+        </div>
+        <div>
+          <label>区分</label>
+          <select id="mealType">
+            <option value="朝食">朝食</option>
+            <option value="昼食">昼食</option>
+            <option value="夕食">夕食</option>
+            <option value="間食">間食</option>
+          </select>
+        </div>
+        <div>
+          <label>カロリー(kcal)</label>
+          <input type="number" id="calories" min="0" step="1" required>
+        </div>
+        <div>
+          <label>たんぱく質(g)</label>
+          <input type="number" id="protein" min="0" step="0.1" value="0">
+        </div>
+        <div>
+          <label>脂質/糖質(g)</label>
+          <input type="number" id="fat" min="0" step="0.1" value="0">
+        </div>
+        <button type="submit">追加</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>記録一覧</h2>
+      <table id="entryTable">
+        <thead>
+          <tr>
+            <th>区分</th><th>料理名</th><th class="num">kcal</th><th class="num">P(g)</th><th class="num">F(g)</th><th></th>
+          </tr>
+        </thead>
+        <tbody id="entryTbody"></tbody>
+      </table>
+      <div class="empty-msg" id="emptyMsg" style="display:none;">この日の記録はまだありません</div>
+    </div>
+  </div>
+
+  <!-- 履歴タブ -->
+  <div class="tab-panel" id="tab-history">
+    <div class="card">
+      <h2>過去の記録</h2>
+      <table>
+        <thead><tr><th>日付</th><th class="num">合計kcal</th><th class="num">件数</th><th></th></tr></thead>
+        <tbody id="historyTbody"></tbody>
+      </table>
+      <div class="empty-msg" id="historyEmptyMsg" style="display:none;">まだ記録がありません</div>
+    </div>
+  </div>
+
+  <!-- 設定タブ -->
+  <div class="tab-panel" id="tab-settings">
+    <div class="card">
+      <h2>目標設定</h2>
+      <div class="settings-row">
+        <div>
+          <label>目標カロリー(kcal/日)</label>
+          <input type="number" id="goalCalories" min="0" step="10">
+        </div>
+        <div>
+          <label>目標たんぱく質(g/日)</label>
+          <input type="number" id="goalProtein" min="0" step="1">
+        </div>
+        <div>
+          <label>目標脂質/糖質(g/日)</label>
+          <input type="number" id="goalFat" min="0" step="1">
+        </div>
+      </div>
+      <div class="save-note">入力すると自動的に保存されます(このブラウザ内にのみ保存)</div>
+    </div>
+
+    <div class="card">
+      <h2>データ管理</h2>
+      <div class="actions-row">
+        <button id="exportBtn">JSONエクスポート</button>
+        <button id="importBtn">JSONインポート</button>
+        <button id="clearBtn" class="danger">全データ削除</button>
+      </div>
+      <input type="file" id="importFile" accept="application/json" style="display:none;">
+    </div>
+  </div>
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var STORAGE_KEY = "mealManagerData_v1";
+
+  /* ---------- データ層 ---------- */
+  function loadData() {
+    try {
+      var raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return defaultData();
+      var parsed = JSON.parse(raw);
+      if (!parsed.entries) parsed.entries = {};
+      if (!parsed.goals) parsed.goals = { calories: 2000, protein: 60, fat: 60 };
+      return parsed;
+    } catch (e) {
+      return defaultData();
+    }
+  }
+
+  function defaultData() {
+    return { entries: {}, goals: { calories: 2000, protein: 60, fat: 60 } };
+  }
+
+  function saveData() {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  }
+
+  var state = loadData();
+
+  /* ---------- ユーティリティ ---------- */
+  function todayStr() {
+    var d = new Date();
+    return formatDate(d);
+  }
+  function formatDate(d) {
+    var y = d.getFullYear();
+    var m = String(d.getMonth() + 1).padStart(2, "0");
+    var day = String(d.getDate()).padStart(2, "0");
+    return y + "-" + m + "-" + day;
+  }
+  function addDays(dateStr, n) {
+    var d = new Date(dateStr + "T00:00:00");
+    d.setDate(d.getDate() + n);
+    return formatDate(d);
+  }
+  function uid() {
+    return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  }
+  function escapeHtml(str) {
+    var div = document.createElement("div");
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  var currentDate = todayStr();
+
+  /* ---------- 要素参照 ---------- */
+  var dateInput = document.getElementById("dateInput");
+  var summaryGrid = document.getElementById("summaryGrid");
+  var goalBarFill = document.getElementById("goalBarFill");
+  var goalText = document.getElementById("goalText");
+  var entryForm = document.getElementById("entryForm");
+  var entryTbody = document.getElementById("entryTbody");
+  var emptyMsg = document.getElementById("emptyMsg");
+  var historyTbody = document.getElementById("historyTbody");
+  var historyEmptyMsg = document.getElementById("historyEmptyMsg");
+  var goalCaloriesInput = document.getElementById("goalCalories");
+  var goalProteinInput = document.getElementById("goalProtein");
+  var goalFatInput = document.getElementById("goalFat");
+
+  /* ---------- タブ切替 ---------- */
+  document.querySelectorAll(".tab-btn").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      document.querySelectorAll(".tab-btn").forEach(function (b) { b.classList.remove("active"); });
+      document.querySelectorAll(".tab-panel").forEach(function (p) { p.classList.remove("active"); });
+      btn.classList.add("active");
+      document.getElementById("tab-" + btn.dataset.tab).classList.add("active");
+      if (btn.dataset.tab === "history") renderHistory();
+    });
+  });
+
+  /* ---------- 日付ナビ ---------- */
+  dateInput.value = currentDate;
+  dateInput.addEventListener("change", function () {
+    currentDate = dateInput.value || todayStr();
+    renderDaily();
+  });
+  document.getElementById("prevDay").addEventListener("click", function () {
+    currentDate = addDays(currentDate, -1);
+    dateInput.value = currentDate;
+    renderDaily();
+  });
+  document.getElementById("nextDay").addEventListener("click", function () {
+    currentDate = addDays(currentDate, 1);
+    dateInput.value = currentDate;
+    renderDaily();
+  });
+  document.getElementById("todayBtn").addEventListener("click", function () {
+    currentDate = todayStr();
+    dateInput.value = currentDate;
+    renderDaily();
+  });
+
+  /* ---------- 記録追加 ---------- */
+  entryForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var name = document.getElementById("foodName").value.trim();
+    var mealType = document.getElementById("mealType").value;
+    var cal = parseFloat(document.getElementById("calories").value) || 0;
+    var protein = parseFloat(document.getElementById("protein").value) || 0;
+    var fat = parseFloat(document.getElementById("fat").value) || 0;
+    if (!name) return;
+
+    if (!state.entries[currentDate]) state.entries[currentDate] = [];
+    state.entries[currentDate].push({
+      id: uid(),
+      name: name,
+      mealType: mealType,
+      calories: cal,
+      protein: protein,
+      fat: fat
+    });
+    saveData();
+    entryForm.reset();
+    document.getElementById("mealType").value = mealType;
+    renderDaily();
+  });
+
+  function deleteEntry(dateStr, id) {
+    if (!state.entries[dateStr]) return;
+    state.entries[dateStr] = state.entries[dateStr].filter(function (en) { return en.id !== id; });
+    if (state.entries[dateStr].length === 0) delete state.entries[dateStr];
+    saveData();
+    renderDaily();
+    renderHistory();
+  }
+
+  /* ---------- 日次描画 ---------- */
+  function renderDaily() {
+    var list = state.entries[currentDate] || [];
+    var totalCal = 0, totalProtein = 0, totalFat = 0;
+    list.forEach(function (en) {
+      totalCal += en.calories;
+      totalProtein += en.protein;
+      totalFat += en.fat;
+    });
+
+    summaryGrid.innerHTML =
+      summaryItem("合計カロリー", Math.round(totalCal) + " kcal") +
+      summaryItem("たんぱく質", totalProtein.toFixed(1) + " g") +
+      summaryItem("脂質/糖質", totalFat.toFixed(1) + " g") +
+      summaryItem("記録数", list.length + " 件");
+
+    var goal = state.goals.calories || 0;
+    var pct = goal > 0 ? Math.min(100, (totalCal / goal) * 100) : 0;
+    goalBarFill.style.width = pct + "%";
+    goalBarFill.classList.toggle("over", goal > 0 && totalCal > goal);
+    goalText.textContent = goal > 0
+      ? Math.round(totalCal) + " / " + goal + " kcal (" + Math.round((totalCal / goal) * 100) + "%)"
+      : "目標カロリーが未設定です";
+
+    entryTbody.innerHTML = "";
+    if (list.length === 0) {
+      emptyMsg.style.display = "block";
+    } else {
+      emptyMsg.style.display = "none";
+      list.forEach(function (en) {
+        var tr = document.createElement("tr");
+        tr.innerHTML =
+          '<td><span class="meal-tag">' + escapeHtml(en.mealType) + '</span></td>' +
+          '<td>' + escapeHtml(en.name) + '</td>' +
+          '<td class="num">' + Math.round(en.calories) + '</td>' +
+          '<td class="num">' + en.protein.toFixed(1) + '</td>' +
+          '<td class="num">' + en.fat.toFixed(1) + '</td>' +
+          '<td><button class="del-btn" title="削除">✕</button></td>';
+        tr.querySelector(".del-btn").addEventListener("click", function () {
+          deleteEntry(currentDate, en.id);
+        });
+        entryTbody.appendChild(tr);
+      });
+    }
+  }
+
+  function summaryItem(label, value) {
+    return '<div class="summary-item"><div class="label">' + escapeHtml(label) + '</div><div class="value">' + escapeHtml(String(value)) + '</div></div>';
+  }
+
+  /* ---------- 履歴描画 ---------- */
+  function renderHistory() {
+    var dates = Object.keys(state.entries).sort().reverse();
+    historyTbody.innerHTML = "";
+    if (dates.length === 0) {
+      historyEmptyMsg.style.display = "block";
+      return;
+    }
+    historyEmptyMsg.style.display = "none";
+    dates.forEach(function (d) {
+      var list = state.entries[d];
+      var total = list.reduce(function (s, en) { return s + en.calories; }, 0);
+      var tr = document.createElement("tr");
+      tr.innerHTML =
+        '<td>' + d + '</td>' +
+        '<td class="num">' + Math.round(total) + '</td>' +
+        '<td class="num">' + list.length + '</td>' +
+        '<td><button class="del-btn" title="この日を表示">開く</button></td>';
+      tr.querySelector(".del-btn").addEventListener("click", function () {
+        currentDate = d;
+        dateInput.value = d;
+        document.querySelector('.tab-btn[data-tab="daily"]').click();
+        renderDaily();
+      });
+      historyTbody.appendChild(tr);
+    });
+  }
+
+  /* ---------- 設定 ---------- */
+  goalCaloriesInput.value = state.goals.calories;
+  goalProteinInput.value = state.goals.protein;
+  goalFatInput.value = state.goals.fat;
+
+  function bindGoalInput(input, key) {
+    input.addEventListener("input", function () {
+      var v = parseFloat(input.value);
+      state.goals[key] = isNaN(v) ? 0 : v;
+      saveData();
+      renderDaily();
+    });
+  }
+  bindGoalInput(goalCaloriesInput, "calories");
+  bindGoalInput(goalProteinInput, "protein");
+  bindGoalInput(goalFatInput, "fat");
+
+  /* ---------- データ管理 ---------- */
+  document.getElementById("exportBtn").addEventListener("click", function () {
+    var blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = "meal-data-" + todayStr() + ".json";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  });
+
+  document.getElementById("importBtn").addEventListener("click", function () {
+    document.getElementById("importFile").click();
+  });
+  document.getElementById("importFile").addEventListener("change", function (e) {
+    var file = e.target.files[0];
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function () {
+      try {
+        var parsed = JSON.parse(reader.result);
+        if (!parsed.entries) parsed.entries = {};
+        if (!parsed.goals) parsed.goals = { calories: 2000, protein: 60, fat: 60 };
+        state = parsed;
+        saveData();
+        goalCaloriesInput.value = state.goals.calories;
+        goalProteinInput.value = state.goals.protein;
+        goalFatInput.value = state.goals.fat;
+        renderDaily();
+        renderHistory();
+        alert("インポートが完了しました");
+      } catch (err) {
+        alert("読み込みに失敗しました: ファイル形式を確認してください");
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  });
+
+  document.getElementById("clearBtn").addEventListener("click", function () {
+    if (confirm("全ての記録データを削除します。よろしいですか?")) {
+      state = defaultData();
+      saveData();
+      goalCaloriesInput.value = state.goals.calories;
+      goalProteinInput.value = state.goals.protein;
+      goalFatInput.value = state.goals.fat;
+      renderDaily();
+      renderHistory();
+    }
+  });
+
+  /* ---------- 初期描画 ---------- */
+  renderDaily();
+  renderHistory();
+})();
+</script>
+
+</body>
+</html>
